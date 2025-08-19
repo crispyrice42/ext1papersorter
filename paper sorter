@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HSC Ext1 Paper Sorter · OCR → Questions → Topics</title>
+  <!-- Tailwind (CDN) for quick, clean styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    html, body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; }
+    .card { @apply rounded-2xl shadow-lg bg-white border border-slate-200; }
+    .badge { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border; }
+    .badge-topic { @apply border-slate-300 bg-slate-50 text-slate-700; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .hidden-imp { display:none !important; }
+  </style>
+  <!-- Tesseract.js (OCR) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
+  <!-- pdf.js (to read PDFs in the browser) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.js"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-800">
+  <div class="max-w-5xl mx-auto p-6 sm:p-10">
+    <header class="mb-8">
+      <h1 class="text-3xl sm:text-4xl font-bold tracking-tight">HSC Extension 1 – Paper Sorter</h1>
+      <p class="text-slate-600 mt-1">Upload a PDF or image of a test. This tool will OCR it, split into questions, and sort them by topic.</p>
+    </header>
+
+    <section class="card p-6 mb-6">
+      <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+        <div>
+          <label class="block text-sm font-medium text-slate-700">Upload exam (PDF/JPG/PNG)</label>
+          <input id="fileInput" type="file" accept=".pdf,image/*" class="mt-2 block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-slate-800 file:text-white hover:file:bg-slate-700" />
+          <p class="text-xs text-slate-500 mt-2">All processing happens in your browser. For best math OCR, use a clear scan. (Optional: connect a classifier endpoint for higher-accuracy topic tagging.)</p>
+        </div>
+        <div class="flex gap-3">
+          <button id="btnProcess" class="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-semibold shadow hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed" disabled>Run OCR & Sort</button>
+          <button id="btnReset" class="px-4 py-2.5 rounded-xl bg-slate-200 text-slate-800 font-semibold hover:bg-slate-300">Reset</button>
+        </div>
+      </div>
+
+      <div class="mt-5 grid sm:grid-cols-3 gap-4">
+        <div class="card p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-500 mb-2">Step 1</div>
+          <div class="font-semibold">OCR</div>
+          <div id="ocrStatus" class="text-sm text-slate-600 mt-1">Waiting for file…</div>
+          <progress id="ocrProgress" value="0" max="1" class="w-full mt-2"></progress>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-500 mb-2">Step 2</div>
+          <div class="font-semibold">Split into Questions</div>
+          <div id="splitStatus" class="text-sm text-slate-600 mt-1">—</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-500 mb-2">Step 3</div>
+          <div class="font-semibold">Topic Classification</div>
+          <div id="clsStatus" class="text-sm text-slate-600 mt-1">—</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultsSection" class="card p-6 hidden">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-2xl font-semibold">Results</h2>
+        <div class="flex gap-2">
+          <button id="btnDownloadTxt" class="px-4 py-2 rounded-xl bg-slate-800 text-white font-semibold hover:bg-slate-700">Download .txt</button>
+          <button id="btnDownloadJson" class="px-4 py-2 rounded-xl bg-slate-800 text-white font-semibold hover:bg-slate-700">Download .json</button>
+        </div>
+      </div>
+      <div id="results" class="space-y-6"></div>
+    </section>
+
+    <footer class="mt-10 text-center text-xs text-slate-500">
+      <p>Tip: For best topic accuracy, connect your own classifier endpoint (Cloudflare Worker, Netlify/Vercel Function) that calls the OpenAI API securely. See <span class="mono">CLASSIFIER_ENDPOINT</span> in the code.</p>
+    </footer>
+  </div>
+
+  <script>
+    // =============== CONFIG ======================
+    // If you deploy a small backend (e.g., Cloudflare Worker) that calls the OpenAI API,
+    // put its URL here. Leave null to use local keyword-based fallback.
+    const CLASSIFIER_ENDPOINT = null; // e.g. "https://your-worker.example.workers.dev/classify"
+
+    // Define your topics (feel free to edit for your syllabus)
+    const TOPICS = [
+      "Mathematical Induction",
+      "Vectors",
+      "Further Calculus",
+      "Trigonometric Equations",
+      "Projectile Motion",
+      "Differential Equations",
+      "Binomial and Normal Distribution",
+      "Polynomials",
+      "Further Graphs",
+      "Combinatorics",
+      "Further Rates",
+      "Binomial Expansion",
+      "Further Trigonometry",
+      "Other"
+    ];
+
+    // =============== UTILITIES ===================
+    function $(sel){ return document.querySelector(sel); }
+    function escapeHtml(s){
+      return s.replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+    }
+    function download(filename, text){
+      const blob = new Blob([text], {type: 'text/plain'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function groupByTopic(items){
+      const map = new Map();
+      TOPICS.forEach(t => map.set(t, []));
+      for(const it of items){
+        const t = TOPICS.includes(it.topic) ? it.topic : 'Other';
+        map.get(t).push(it);
+      }
+      return map;
+    }
+
+    // =============== OCR (image or PDF) ==========
+    async function ocrImage(file, onProgress){
+      const worker = await Tesseract.createWorker('eng');
+      try {
+        const { data } = await worker.recognize(file, { logger: m => {
+          if(m.status === 'recognizing text' && onProgress) onProgress(m.progress || 0);
+        }});
+        return data.text || '';
+      } finally {
+        await worker.terminate();
+      }
+    }
+
+    async function pdfToImages(file){
+      const pdfjsLib = window['pdfjsLib'];
+      const typedarray = new Uint8Array(await file.arrayBuffer());
+      const loadingTask = pdfjsLib.getDocument({ data: typedarray });
+      const pdf = await loadingTask.promise;
+      const images = [];
+      for(let p = 1; p <= pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        const blob = await new Promise(res => canvas.toBlob(res));
+        images.push(blob);
+      }
+      return images;
+    }
+
+    async function runOCR(file){
+      $('#ocrStatus').textContent = 'Starting OCR…';
+      $('#ocrProgress').value = 0;
+
+      if(file.type === 'application/pdf'){
+        const pages = await pdfToImages(file);
+        let allText = '';
+        let idx = 0;
+        for(const img of pages){
+          $('#ocrStatus').textContent = `OCR page ${idx+1}/${pages.length}…`;
+          const text = await ocrImage(img, (p)=>{ $('#ocrProgress').value = (idx + p)/pages.length; });
+          allText += `\n\n--- Page ${idx+1} ---\n` + text;
+          idx++;
+        }
+        $('#ocrStatus').textContent = 'OCR complete.';
+        $('#ocrProgress').value = 1;
+        return allText.trim();
+      } else {
+        const text = await ocrImage(file, (p)=>{ $('#ocrProgress').value = p; });
+        $('#ocrStatus').textContent = 'OCR complete.';
+        $('#ocrProgress').value = 1;
+        return text.trim();
+      }
+    }
+
+    // =============== SPLIT INTO QUESTIONS ========
+    function splitIntoQuestions(raw){
+      // Normalise line endings
+      const text = raw.replace(/\r\n?/g, '\n');
+
+      // Try common exam markers: "Question 1", "Q1", "1.", "(a)", etc.
+      // Primary split: lines that start with a number + punctuation OR the word Question/Q.
+      const parts = text
+        .split(/\n(?=(?:Question\s*\d+|Q\s*\d+|\d+\s*[).:]\s))/gi)
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      // If it didn’t split well, fallback: split by blank lines of length >=2
+      const fallback = text.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+      const chunks = parts.length >= 2 ? parts : fallback;
+
+      // Label them Q1..Qn if not already labelled
+      return chunks.map((c, i) => {
+        const hasLabel = /^(Question\s*\d+|Q\s*\d+|\d+\s*[).:])/i.test(c);
+        return {
+          id: i+1,
+          title: hasLabel ? (c.match(/^(.*?)(\n|$)/)?.[1] ?? `Question ${i+1}`) : `Question ${i+1}`,
+          text: c
+        };
+      });
+    }
+
+    // =============== TOPIC CLASSIFICATION ========
+    async function classifyQuestions(questions){
+      $('#clsStatus').textContent = CLASSIFIER_ENDPOINT ? 'Classifying with API…' : 'Classifying (local heuristic)…';
+
+      if (CLASSIFIER_ENDPOINT){
+        const res = await fetch(CLASSIFIER_ENDPOINT, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ questions, topics: TOPICS })
+        });
+        if(!res.ok){ throw new Error('Classifier endpoint error'); }
+        const data = await res.json();
+        // Expect: [{id, topic, rationale?}]
+        return questions.map((q, i) => ({ ...q, topic: data[i]?.topic || 'Other', rationale: data[i]?.rationale || '' }));
+      }
+
+      // Fallback keyword-based heuristic (editable):
+      const kw = {
+        'Polynomials': [/polynomial|roots?|factor|remainder|division|graph of y\s*=\s*.+?\^\d/i],
+        'Binomial': [/binomial|coefficient|\(.*\)\^\d|expand/i],
+        'Trigonometry': [/sin|cos|tan|trig|identity|radians?|degrees?/i],
+        'Calculus': [/differentiate|integrate|derivative|antiderivative|rate of change|taylor|limit/i],
+        'Probability': [/probability|p\(|binomial distribution|mean and variance|random variable|expected value/i],
+        'Vectors': [/vector|dot product|magnitude|direction cosines|i\^|j\^|k\^/i],
+        'Complex Numbers': [/complex|arg\(|argand|cis|imaginary|i\b(?!\^)/i],
+        'Sequences & Series': [/sequence|series|recurrence|sigma|arithmetic|geometric/i],
+        'Coordinate Geometry': [/locus|circle|parabola|hyperbola|ellipse|gradient|distance formula/i]
+      };
+      return questions.map(q => {
+        let topic = 'Other';
+        for(const [t, regs] of Object.entries(kw)){
+          if(regs.some(r => r.test(q.text))){ topic = t; break; }
+        }
+        return { ...q, topic };
+      });
+    }
+
+    // =============== RENDER RESULTS ==============
+    function renderResults(items){
+      const grouped = groupByTopic(items);
+      const root = $('#results');
+      root.innerHTML = '';
+      for(const [topic, arr] of grouped){
+        if(arr.length === 0) continue;
+        const sec = document.createElement('section');
+        sec.className = 'border border-slate-200 rounded-2xl p-4';
+        sec.innerHTML = `
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-xl font-semibold">${escapeHtml(topic)}</h3>
+            <span class="badge badge-topic">${arr.length} question${arr.length>1?'s':''}</span>
+          </div>
+          <div class="space-y-3"></div>
+        `;
+        const list = sec.querySelector('div.space-y-3');
+        arr.forEach(q => {
+          const item = document.createElement('div');
+          item.className = 'p-3 rounded-xl bg-slate-50 border border-slate-200';
+          item.innerHTML = `
+            <div class="font-medium mb-1">${escapeHtml(q.title)}</div>
+            <pre class="mono whitespace-pre-wrap text-sm text-slate-700">${escapeHtml(q.text)}</pre>
+          `;
+          list.appendChild(item);
+        });
+        root.appendChild(sec);
+      }
+      $('#resultsSection').classList.remove('hidden');
+    }
+
+    function exportTxt(items){
+      const grouped = groupByTopic(items);
+      let out = '';
+      for(const [topic, arr] of grouped){
+        if(arr.length===0) continue;
+        out += `## ${topic}\n`;
+        for(const q of arr){ out += `\n${q.title}\n${q.text}\n\n`; }
+        out += `\n`;
+      }
+      return out.trim();
+    }
+
+    // =============== MAIN FLOW ===================
+    let currentQuestions = [];
+
+    $('#fileInput').addEventListener('change', () => {
+      $('#btnProcess').disabled = !$('#fileInput').files?.length;
+      $('#ocrStatus').textContent = $('#fileInput').files?.length ? 'Ready.' : 'Waiting for file…';
+      $('#ocrProgress').value = 0;
+      $('#splitStatus').textContent = '—';
+      $('#clsStatus').textContent = '—';
+      $('#resultsSection').classList.add('hidden');
+    });
+
+    $('#btnProcess').addEventListener('click', async () => {
+      try {
+        const f = $('#fileInput').files?.[0];
+        if(!f) return;
+        $('#btnProcess').disabled = true;
+        const text = await runOCR(f);
+        $('#splitStatus').textContent = 'Splitting…';
+        const qs = splitIntoQuestions(text);
+        $('#splitStatus').textContent = `Found ${qs.length} question${qs.length>1?'s':''}.`;
+        const tagged = await classifyQuestions(qs);
+        $('#clsStatus').textContent = 'Done';
+        currentQuestions = tagged;
+        renderResults(tagged);
+      } catch(err){
+        console.error(err);
+        alert('Something went wrong: ' + err.message);
+      } finally {
+        $('#btnProcess').disabled = false;
+      }
+    });
+
+    $('#btnReset').addEventListener('click', () => {
+      $('#fileInput').value = '';
+      $('#btnProcess').disabled = true;
+      $('#ocrStatus').textContent = 'Waiting for file…';
+      $('#ocrProgress').value = 0;
+      $('#splitStatus').textContent = '—';
+      $('#clsStatus').textContent = '—';
+      $('#results').innerHTML = '';
+      $('#resultsSection').classList.add('hidden');
+    });
+
+    $('#btnDownloadTxt').addEventListener('click', () => {
+      if(!currentQuestions.length) return;
+      download('sorted-questions.txt', exportTxt(currentQuestions));
+    });
+
+    $('#btnDownloadJson').addEventListener('click', () => {
+      if(!currentQuestions.length) return;
+      const payload = JSON.stringify(currentQuestions, null, 2);
+      download('sorted-questions.json', payload);
+    });
+  </script>
+</body>
+</html>
